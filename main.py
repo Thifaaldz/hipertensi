@@ -7,6 +7,8 @@ from streamlit_folium import st_folium
 import plotly.express as px
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
+import math
+from geopy.distance import geodesic
 
 # === Load Data ===
 df = pd.read_excel("dataset.xlsx")
@@ -61,6 +63,16 @@ geo_info = gdf[['NAME_3_clean', 'lon', 'lat']]
 df_all = df_all.merge(geo_info, left_on='kecamatan_final', right_on='NAME_3_clean', how='left')
 df_all.drop(columns=['NAME_3_clean'], inplace=True)
 
+# === Rekomendasi Nakes (Logika Sederhana) ===
+df_all['rekomendasi_nakes'] = df_all['persentase'].apply(lambda x: math.ceil(x / 10))
+
+# === Hitung jarak distribusi dari pusat kesehatan ===
+pusat_kesehatan = (-6.1767, 106.8306)  # contoh: Monas Jakarta
+df_all['jarak'] = df_all.apply(
+    lambda row: geodesic(pusat_kesehatan, (row['lat'], row['lon'])).km if pd.notnull(row['lat']) else None,
+    axis=1
+)
+
 # === Sidebar Filter ===
 st.sidebar.title("Filter")
 selected_year = st.sidebar.selectbox("Pilih Tahun", sorted(df_all['tahun'].unique()))
@@ -96,14 +108,20 @@ folium.Choropleth(
     nan_fill_color='white'
 ).add_to(m)
 
+# === Marker Cluster Gabungan (Persentase + Rekomendasi + Jarak) ===
 marker_cluster = MarkerCluster().add_to(m)
-for _, row in merged_gdf.iterrows():
-    if pd.notnull(row['persentase']):
-        centroid = row['geometry'].centroid
+for _, row in filtered_df.iterrows():
+    if pd.notnull(row['persentase']) and pd.notnull(row['lat']):
         color = 'red' if row['prioritas'] == 'Prioritas' else 'green'
-        popup_text = f"<b>{row['NAME_3']}</b><br>Persentase: {row['persentase']:.2f}%<br>Status: {row['prioritas']}"
+        popup_text = f"""
+        <b>{row['kecamatan_final']}</b><br>
+        Persentase: {row['persentase']:.2f}%<br>
+        Status: {row['prioritas']}<br>
+        Rekomendasi Nakes: {int(row['rekomendasi_nakes'])}<br>
+        Jarak dari pusat: {row['jarak']:.2f} km
+        """
         folium.CircleMarker(
-            location=[centroid.y, centroid.x],
+            location=[row['lat'], row['lon']],
             radius=7,
             color=color,
             fill=True,
@@ -112,6 +130,31 @@ for _, row in merged_gdf.iterrows():
             popup=popup_text
         ).add_to(marker_cluster)
 
+# === Jalur Distribusi Puskesmas Keliling ===
+st.subheader("Jalur Distribusi Puskesmas Keliling")
+
+tujuan = filtered_df[['kecamatan_final', 'lat', 'lon']].dropna()
+if not tujuan.empty:
+    tujuan_sorted = tujuan.sort_values(by='kecamatan_final')  # urutan bisa diubah sesuai kebutuhan
+    points = [pusat_kesehatan] + list(zip(tujuan_sorted['lat'], tujuan_sorted['lon']))
+
+    folium.PolyLine(
+        locations=points,
+        color="blue",
+        weight=3,
+        opacity=0.8,
+        tooltip="Jalur Puskesmas Keliling"
+    ).add_to(m)
+
+    folium.Marker(
+        location=pusat_kesehatan,
+        popup="Pusat Kesehatan (Dinkes)",
+        icon=folium.Icon(color="red", icon="hospital", prefix="fa")
+    ).add_to(m)
+else:
+    st.info("Tidak ada titik distribusi untuk filter yang dipilih.")
+
+# === Tampilkan Map ===
 st_folium(m, width=725)
 
 # === Bar Chart Comparison ===
@@ -125,12 +168,12 @@ fig = px.bar(
     color='prioritas',
     barmode='group',
     title=f"Perbandingan Hipertensi {'Kecamatan ' + selected_kecamatan if selected_kecamatan != 'Semua' else 'Semua Kecamatan'}",
-    hover_data=['wilayah', 'kecamatan_final']
+    hover_data=['wilayah', 'kecamatan_final', 'rekomendasi_nakes']
 )
 st.plotly_chart(fig, use_container_width=True)
 
 # === Export to CSV ===
 export = df_all.rename(columns={'kecamatan_final': 'kecamatan'})
-csv = export[['kecamatan', 'wilayah', 'tahun', 'persentase', 'prioritas', 'lat', 'lon']].to_csv(index=False).encode('utf-8')
-st.download_button("📥 Download Prediksi (2024–2030)", data=csv,
-                   file_name='prediksi_hipertensi_prioritas_koordinat.csv', mime='text/csv')
+csv = export[['kecamatan', 'wilayah', 'tahun', 'persentase', 'prioritas', 'rekomendasi_nakes', 'jarak', 'lat', 'lon']].to_csv(index=False).encode('utf-8')
+st.download_button("📥 Download Prediksi & Rekomendasi Nakes (2024–2030)", data=csv,
+                   file_name='prediksi_hipertensi_prioritas_nakes_koordinat.csv', mime='text/csv')
